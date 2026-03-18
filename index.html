@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<!--
+  MONSERRATE RUNNER — itch.io Upload Instructions
+  ================================================
+  1. This is a single self-contained index.html file (no external assets).
+  2. To upload to itch.io:
+     a. Go to itch.io → Dashboard → Create new project
+     b. Kind: HTML
+     c. Upload this index.html directly, OR zip it first:
+        zip monserrate-runner.zip index.html
+     d. Check "This file will be played in the browser"
+     e. Set viewport: 390×844 (portrait)
+     f. Publish!
+-->
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Monserrate Runner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a0a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Georgia', serif;
+    touch-action: none;
+  }
+  #gameCanvas {
+    display: block;
+    image-rendering: pixelated;
+  }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+'use strict';
+
+// ─── CANVAS SETUP ──────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const BASE_W = 390;
+const BASE_H = 844;
+let scale = 1;
+
+function resize() {
+  const ww = window.innerWidth, wh = window.innerHeight;
+  scale = Math.min(ww / BASE_W, wh / BASE_H);
+  canvas.width  = BASE_W * scale;
+  canvas.height = BASE_H * scale;
+  canvas.style.width  = canvas.width  + 'px';
+  canvas.style.height = canvas.height + 'px';
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─── AUDIO ENGINE ──────────────────────────────────────────────────────────
+let audioCtx = null;
+let musicNodes = [];
+let musicPlaying = false;
+let musicInterval = null;
+
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playTone(freq, type, duration, vol=0.3, delay=0, dest=null) {
+  const ac = getAudio();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.connect(gain);
+  gain.connect(dest || ac.destination);
+  osc.type = type;
+  osc.frequency.value = freq;
+  const t = ac.currentTime + delay;
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(vol, t + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  osc.start(t);
+  osc.stop(t + duration + 0.05);
+  return osc;
+}
+
+// Colombian-flavored melody (cumbia-like pattern)
+const MELODY = [
+  [392,0],[440,0.2],[523,0.4],[587,0.6],[523,0.8],
+  [440,1.0],[392,1.2],[349,1.4],
+  [392,1.6],[523,1.8],[659,2.0],[698,2.2],[659,2.4],
+  [587,2.6],[523,2.8],[440,3.0],
+];
+const BASS = [
+  [98,0],[98,0.4],[110,0.8],[98,1.2],
+  [110,1.6],[110,2.0],[123,2.4],[110,2.8],
+];
+
+function startMusic() {
+  if (musicPlaying) return;
+  musicPlaying = true;
+  const ac = getAudio();
+  if (ac.state === 'suspended') ac.resume();
+
+  const loopDuration = 3.2;
+  let startTime = ac.currentTime;
+
+  function scheduleLoop() {
+    MELODY.forEach(([freq, off]) => playTone(freq, 'triangle', 0.18, 0.18, startTime - ac.currentTime + off));
+    BASS.forEach(([freq, off])   => playTone(freq, 'sawtooth', 0.35, 0.12, startTime - ac.currentTime + off));
+    // Rhythm claps
+    [0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8].forEach(off => {
+      playTone(200 + Math.random()*100, 'square', 0.05, 0.06, startTime - ac.currentTime + off);
+    });
+    startTime += loopDuration;
+  }
+
+  scheduleLoop();
+  musicInterval = setInterval(() => {
+    if (musicPlaying) scheduleLoop();
+  }, loopDuration * 1000);
+}
+
+function stopMusic() {
+  musicPlaying = false;
+  if (musicInterval) { clearInterval(musicInterval); musicInterval = null; }
+}
+
+function sfxSwitch() {
+  playTone(660, 'square', 0.08, 0.2);
+  playTone(880, 'square', 0.08, 0.15, 0.06);
+}
+function sfxSlide() {
+  const ac = getAudio();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.connect(gain); gain.connect(ac.destination);
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(400, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(150, ac.currentTime + 0.2);
+  gain.gain.setValueAtTime(0.25, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.2);
+  osc.start(); osc.stop(ac.currentTime + 0.25);
+}
+function sfxHit() {
+  playTone(150, 'sawtooth', 0.3, 0.4);
+  playTone(100, 'square',   0.3, 0.3, 0.05);
+}
+function sfxMilagro() {
+  [523,659,784,1047].forEach((f,i) => playTone(f, 'sine', 0.2, 0.3, i*0.1));
+}
+
+// ─── GAME CONSTANTS ─────────────────────────────────────────────────────────
+const W = BASE_W, H = BASE_H;
+const LANE_COUNT = 3;
+const LANE_XS = [W*0.22, W*0.5, W*0.78]; // center x of each lane
+const LANE_W  = W * 0.28;
+
+const HUD_H = 80;
+const PLAY_H = H - HUD_H;
+
+const PLAYER_W = 36, PLAYER_H = 56;
+const PLAYER_Y = H - 160;
+
+const MAX_ALT = 900;
+const BASE_SPEED = 3.5;
+
+// ─── GAME STATE ─────────────────────────────────────────────────────────────
+let state = 'title'; // title | playing | dead | win
+let lane = 1;        // 0=left 1=center 2=right
+let altitude = 0;
+let score = 0;
+let speed = BASE_SPEED;
+let invincible = false;
+let invincibleTimer = 0;
+let sliding = false;
+let slideTimer = 0;
+let laneChanging = false;
+let laneChangeProgress = 0;
+let fromLane = 1;
+let toLane = 1;
+
+let stepOffset = 0;
+let obstacles = [];
+let particles = [];
+let milagros = [];
+let flashTimer = 0;
+let flashColor = 'rgba(255,215,0,0.4)';
+
+let frameCount = 0;
+let spawnTimer = 0;
+let spawnInterval = 90;  // frames between spawns (decreases with altitude)
+let highScore = 0;
+
+// Touch tracking
+let touchStartX = 0, touchStartY = 0;
+
+// ─── DRAWING HELPERS ────────────────────────────────────────────────────────
+function fillRect(x,y,w,h,color) {
+  ctx.fillStyle = color; ctx.fillRect(x,y,w,h);
+}
+function circle(x,y,r,color) {
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle = color; ctx.fill();
+}
+function roundRect(x,y,w,h,r,color) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+  ctx.fillStyle = color; ctx.fill();
+}
+function text(str, x, y, size, color, align='center', font='Georgia') {
+  ctx.font = `${size}px ${font}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.fillText(str, x, y);
+}
+function strokeText(str, x, y, size, color, strokeColor, align='center') {
+  ctx.font = `bold ${size}px Georgia`;
+  ctx.textAlign = align;
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = 3;
+  ctx.strokeText(str, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(str, x, y);
+}
+
+// ─── BACKGROUND DRAWING ──────────────────────────────────────────────────────
+function drawBackground() {
+  const progress = altitude / MAX_ALT;
+
+  // Sky gradient — gets slightly deeper blue at higher altitudes
+  const skyGrad = ctx.createLinearGradient(0, HUD_H, 0, H);
+  skyGrad.addColorStop(0, `hsl(${200 + progress*10}, ${70 - progress*10}%, ${60 + progress*10}%)`);
+  skyGrad.addColorStop(1, `hsl(${180}, 50%, 75%)`);
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, HUD_H, W, H - HUD_H);
+
+  // Sun
+  const sunY = HUD_H + 60 - progress * 30;
+  const sunGrad = ctx.createRadialGradient(W*0.8, sunY, 2, W*0.8, sunY, 35);
+  sunGrad.addColorStop(0, '#fffde0');
+  sunGrad.addColorStop(0.5, '#ffe082');
+  sunGrad.addColorStop(1, 'rgba(255,224,130,0)');
+  ctx.fillStyle = sunGrad;
+  ctx.beginPath(); ctx.arc(W*0.8, sunY, 35, 0, Math.PI*2); ctx.fill();
+
+  // Distant mountains — multiple layers
+  drawMountains(progress);
+
+  // Basilica grows larger as progress increases
+  drawBasilica(progress);
+
+  // Green hills foreground
+  drawHills(progress);
+}
+
+function drawMountains(p) {
+  // Far mountains
+  ctx.fillStyle = `hsl(${140 + p*20}, 35%, ${45 + p*15}%)`;
+  ctx.beginPath();
+  ctx.moveTo(0, HUD_H + 180);
+  [0,60,110,160,220,280,330,390].forEach((x,i) => {
+    const peaks = [180,120,155,100,140,160,110,180];
+    ctx.lineTo(x, HUD_H + peaks[i] - p*40);
+  });
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Mid mountains
+  ctx.fillStyle = `hsl(${130 + p*15}, 45%, ${38 + p*10}%)`;
+  ctx.beginPath();
+  ctx.moveTo(0, HUD_H + 240);
+  [0,50,100,150,200,250,300,350,390].forEach((x,i) => {
+    const peaks = [240,195,220,175,210,230,185,215,240];
+    ctx.lineTo(x, HUD_H + peaks[i] - p*20);
+  });
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBasilica(p) {
+  if (p < 0.05) return;
+  const bScale = 0.15 + p * 0.85;
+  const bW = 100 * bScale;
+  const bH = 140 * bScale;
+  const bX = W/2 - bW/2;
+  const bY = HUD_H + 30 + (1-p) * 120;
+
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, p * 2);
+
+  // Body
+  ctx.fillStyle = '#f5f0e8';
+  ctx.fillRect(bX, bY + bH*0.3, bW, bH*0.7);
+
+  // Dome
+  ctx.fillStyle = '#e8e0d0';
+  ctx.beginPath();
+  ctx.arc(bX + bW/2, bY + bH*0.35, bW*0.32, Math.PI, 0);
+  ctx.fill();
+
+  // Bell tower left
+  ctx.fillStyle = '#f0eadc';
+  ctx.fillRect(bX - bW*0.1, bY + bH*0.15, bW*0.22, bH*0.85);
+  ctx.fillStyle = '#d4c9b0';
+  ctx.beginPath();
+  ctx.moveTo(bX - bW*0.1, bY + bH*0.15);
+  ctx.lineTo(bX + bW*0.01, bY + bH*0.02);
+  ctx.lineTo(bX + bW*0.12, bY + bH*0.15);
+  ctx.fill();
+
+  // Bell tower right
+  ctx.fillStyle = '#f0eadc';
+  ctx.fillRect(bX + bW*0.88, bY + bH*0.15, bW*0.22, bH*0.85);
+  ctx.fillStyle = '#d4c9b0';
+  ctx.beginPath();
+  ctx.moveTo(bX + bW*0.88, bY + bH*0.15);
+  ctx.lineTo(bX + bW*0.99, bY + bH*0.02);
+  ctx.lineTo(bX + bW*1.1, bY + bH*0.15);
+  ctx.fill();
+
+  // Cross on dome
+  ctx.fillStyle = '#c0a060';
+  ctx.fillRect(bX + bW/2 - bW*0.02, bY - bH*0.05, bW*0.04, bH*0.18);
+  ctx.fillRect(bX + bW/2 - bW*0.08, bY + bH*0.03, bW*0.16, bH*0.04);
+
+  // Windows
+  ctx.fillStyle = '#a0c8e8';
+  ctx.beginPath();
+  ctx.arc(bX + bW*0.25, bY + bH*0.5, bW*0.07, Math.PI, 0);
+  ctx.rect(bX + bW*0.18, bY + bH*0.5, bW*0.14, bH*0.15);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(bX + bW*0.75, bY + bH*0.5, bW*0.07, Math.PI, 0);
+  ctx.rect(bX + bW*0.68, bY + bH*0.5, bW*0.14, bH*0.15);
+  ctx.fill();
+
+  // Facade door
+  ctx.fillStyle = '#8b7355';
+  ctx.beginPath();
+  ctx.arc(bX + bW/2, bY + bH*0.75, bW*0.1, Math.PI, 0);
+  ctx.rect(bX + bW*0.4, bY + bH*0.75, bW*0.2, bH*0.25);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHills(p) {
+  ctx.fillStyle = `hsl(${120}, 48%, ${35 + p*8}%)`;
+  ctx.beginPath();
+  ctx.moveTo(0, H - 200);
+  ctx.bezierCurveTo(W*0.1, H-240, W*0.3, H-260, W*0.5, H-220);
+  ctx.bezierCurveTo(W*0.7, H-180, W*0.9, H-210, W, H-200);
+  ctx.lineTo(W, H); ctx.lineTo(0, H);
+  ctx.closePath(); ctx.fill();
+}
+
+// ─── STONE STEPS ──────────────────────────────────────────────────────────
+function drawSteps() {
+  const stepH = 36;
+  const totalSteps = Math.ceil(PLAY_H / stepH) + 2;
+  const offset = stepOffset % stepH;
+
+  for (let i = 0; i < totalSteps; i++) {
+    const y = HUD_H + i * stepH - offset;
+
+    // Step base
+    const shade = (i % 2 === 0) ? '#9e9080' : '#8a7d70';
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, y, W, stepH - 2);
+
+    // Step edge shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(0, y, W, 4);
+
+    // Mortar line
+    ctx.fillStyle = '#c0b090';
+    ctx.fillRect(0, y + stepH - 3, W, 3);
+
+    // Vertical lane dividers (subtle)
+    ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+    ctx.lineWidth = 1;
+    [W*0.36, W*0.64].forEach(lx => {
+      ctx.beginPath(); ctx.moveTo(lx, y); ctx.lineTo(lx, y + stepH); ctx.stroke();
+    });
+
+    // Stone texture marks
+    if (i % 3 === 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.06)';
+      ctx.fillRect(W*0.1, y+8, 30, 4);
+      ctx.fillRect(W*0.55, y+16, 25, 4);
+      ctx.fillRect(W*0.75, y+6, 20, 4);
+    }
+  }
+}
+
+// ─── PLAYER DRAWING ─────────────────────────────────────────────────────────
+function getPlayerX() {
+  if (!laneChanging) return LANE_XS[lane];
+  const t = laneChangeProgress;
+  const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+  return LANE_XS[fromLane] + (LANE_XS[toLane] - LANE_XS[fromLane]) * ease;
+}
+
+function drawPlayer() {
+  const px = getPlayerX();
+  const py = PLAYER_Y;
+  const flash = invincible && Math.floor(frameCount / 4) % 2 === 0;
+  if (flash) return;
+
+  ctx.save();
+  if (invincible) ctx.globalAlpha = 0.85;
+
+  if (sliding) {
+    drawPlayerSliding(px, py);
+  } else {
+    drawPlayerStanding(px, py);
+  }
+  ctx.restore();
+
+  // Invincible glow
+  if (invincible) {
+    const g = ctx.createRadialGradient(px, py, 5, px, py, 40);
+    g.addColorStop(0, 'rgba(255,215,0,0.4)');
+    g.addColorStop(1, 'rgba(255,215,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(px, py, 40, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawPlayerStanding(px, py) {
+  const bob = Math.sin(frameCount * 0.2) * 2;
+  const legSwing = Math.sin(frameCount * 0.25) * 8;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(px, py + PLAYER_H/2 + 4, PLAYER_W*0.5, 6, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Legs
+  ctx.strokeStyle = '#3d2b1f';
+  ctx.lineWidth = 7;
+  ctx.lineCap = 'round';
+  // Left leg
+  ctx.beginPath();
+  ctx.moveTo(px - 5, py + 20 + bob);
+  ctx.lineTo(px - 8 + legSwing, py + PLAYER_H/2 + bob);
+  ctx.stroke();
+  // Right leg
+  ctx.beginPath();
+  ctx.moveTo(px + 5, py + 20 + bob);
+  ctx.lineTo(px + 8 - legSwing, py + PLAYER_H/2 + bob);
+  ctx.stroke();
+
+  // Shoes
+  ctx.fillStyle = '#5c3d1e';
+  ctx.beginPath();
+  ctx.ellipse(px - 8 + legSwing, py + PLAYER_H/2 + 4 + bob, 7, 4, 0.3, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(px + 8 - legSwing, py + PLAYER_H/2 + 4 + bob, 7, 4, -0.3, 0, Math.PI*2);
+  ctx.fill();
+
+  // Body (Colombian flag colors - yellow, blue, red)
+  roundRect(px - PLAYER_W/2 + 2, py - 10 + bob, PLAYER_W - 4, 30, 5, '#f9c843');
+  roundRect(px - PLAYER_W/2 + 2, py - 10 + bob, PLAYER_W - 4, 10, 5, '#f9c843');
+  roundRect(px - PLAYER_W/2 + 2, py - 2 + bob, PLAYER_W - 4, 10, 0, '#003893');
+  roundRect(px - PLAYER_W/2 + 2, py + 8 + bob, PLAYER_W - 4, 12, 5, '#ce1126');
+
+  // Arms
+  ctx.strokeStyle = '#f0c070';
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  // Left arm (with hiking pole)
+  ctx.beginPath();
+  ctx.moveTo(px - PLAYER_W/2 + 2, py - 2 + bob);
+  ctx.lineTo(px - PLAYER_W/2 - 10, py + 15 + bob);
+  ctx.stroke();
+  // Right arm
+  ctx.beginPath();
+  ctx.moveTo(px + PLAYER_W/2 - 2, py - 2 + bob);
+  ctx.lineTo(px + PLAYER_W/2 + 8, py + 12 - legSwing*0.5 + bob);
+  ctx.stroke();
+
+  // Hiking pole
+  ctx.strokeStyle = '#a0a0a0';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px - PLAYER_W/2 - 10, py + 15 + bob);
+  ctx.lineTo(px - PLAYER_W/2 - 14, py + PLAYER_H/2 + 8 + bob);
+  ctx.stroke();
+  // Pole tip
+  circle(px - PLAYER_W/2 - 14, py + PLAYER_H/2 + 8 + bob, 3, '#888');
+
+  // Neck
+  ctx.fillStyle = '#d4956a';
+  ctx.fillRect(px - 5, py - 18 + bob, 10, 10);
+
+  // Head
+  ctx.fillStyle = '#d4956a';
+  ctx.beginPath();
+  ctx.arc(px, py - 24 + bob, 14, 0, Math.PI*2);
+  ctx.fill();
+
+  // Hat (wide-brim Colombian sombrero vueltiao style)
+  ctx.fillStyle = '#8B6914';
+  ctx.beginPath();
+  ctx.ellipse(px, py - 34 + bob, 18, 5, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#a07820';
+  roundRect(px - 9, py - 38 + bob, 18, 12, 4, '#a07820');
+  // Hat band pattern
+  ctx.strokeStyle = '#2d1a00';
+  ctx.lineWidth = 1.5;
+  for(let i=0;i<5;i++){
+    ctx.beginPath();
+    ctx.moveTo(px-9+i*4.5, py-38+bob);
+    ctx.lineTo(px-9+i*4.5, py-26+bob);
+    ctx.stroke();
+  }
+
+  // Face
+  ctx.fillStyle = '#1a0a00';
+  // Eyes
+  ctx.beginPath(); ctx.arc(px-4, py-26+bob, 2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+4, py-26+bob, 2, 0, Math.PI*2); ctx.fill();
+  // Smile
+  ctx.strokeStyle = '#8b4513';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(px, py-22+bob, 4, 0.2, Math.PI-0.2);
+  ctx.stroke();
+
+  // Backpack
+  ctx.fillStyle = '#2e7d32';
+  roundRect(px + PLAYER_W/2 - 4, py - 8 + bob, 10, 20, 3, '#2e7d32');
+}
+
+function drawPlayerSliding(px, py) {
+  const sy = py + PLAYER_H/2 - 12; // lower when sliding
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(px, sy + 16, PLAYER_W*0.7, 6, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Body horizontal
+  ctx.save();
+  ctx.translate(px, sy);
+  ctx.rotate(-0.3);
+
+  // Legs stretched back
+  ctx.strokeStyle = '#3d2b1f';
+  ctx.lineWidth = 7;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-5, 5); ctx.lineTo(25, 8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, 2); ctx.lineTo(28, 4); ctx.stroke();
+  // Shoes
+  ctx.fillStyle = '#5c3d1e';
+  ctx.beginPath(); ctx.ellipse(26, 6, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#f9c843';
+  ctx.beginPath(); ctx.ellipse(-8, 2, 18, 10, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#003893';
+  ctx.beginPath(); ctx.ellipse(-8, 2, 12, 7, 0, 0, Math.PI*2); ctx.fill();
+  // Torso stripe
+  ctx.fillStyle = '#ce1126';
+  ctx.fillRect(-20, -1, 24, 5);
+
+  // Arms forward
+  ctx.strokeStyle = '#f0c070';
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(-18, -2); ctx.lineTo(-30, -8); ctx.stroke();
+
+  // Head
+  ctx.fillStyle = '#d4956a';
+  ctx.beginPath(); ctx.arc(-22, -4, 12, 0, Math.PI*2); ctx.fill();
+  // Hat
+  ctx.fillStyle = '#8B6914';
+  ctx.beginPath(); ctx.ellipse(-22, -13, 15, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#a07820';
+  roundRect(-28, -17, 14, 10, 3, '#a07820');
+
+  ctx.restore();
+}
+
+// ─── OBSTACLE TYPES ─────────────────────────────────────────────────────────
+// Types: 'viejita', 'penitente', 'anda', 'pilgrim'
+
+function drawViejita(x, y) {
+  // Elderly woman in black with a walking stick
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(0, 22, 14, 5, 0, 0, Math.PI*2); ctx.fill();
+
+  // Legs (shuffling)
+  const step = Math.sin(frameCount * 0.15) * 5;
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-4, 8); ctx.lineTo(-6+step, 22); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(4, 8); ctx.lineTo(6-step, 22); ctx.stroke();
+  // Shoes
+  ctx.fillStyle = '#2a1a0a';
+  ctx.beginPath(); ctx.ellipse(-5+step, 23, 5, 3, 0.2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(5-step, 23, 5, 3, -0.2, 0, Math.PI*2); ctx.fill();
+
+  // Body (hunched, all black — traditional mourning/pilgrimage dress)
+  ctx.save();
+  ctx.translate(0, -4);
+  ctx.rotate(0.15); // hunched forward
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.moveTo(-10, -8);
+  ctx.quadraticCurveTo(-14, 2, -10, 14);
+  ctx.quadraticCurveTo(0, 18, 10, 14);
+  ctx.quadraticCurveTo(14, 2, 10, -8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // Walking stick
+  ctx.strokeStyle = '#5c3d1e';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(12, -8);
+  ctx.lineTo(14, 22);
+  ctx.stroke();
+  circle(12, -9, 3, '#5c3d1e');
+
+  // Shawl/mantilla
+  ctx.fillStyle = '#0a0a0a';
+  ctx.beginPath();
+  ctx.moveTo(-12, -14);
+  ctx.quadraticCurveTo(0, -18, 12, -14);
+  ctx.quadraticCurveTo(8, -4, 0, -2);
+  ctx.quadraticCurveTo(-8, -4, -12, -14);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = '#c4856a';
+  ctx.beginPath(); ctx.arc(0, -16, 10, 0, Math.PI*2); ctx.fill();
+  // Headscarf
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.moveTo(-10, -20);
+  ctx.quadraticCurveTo(0, -28, 10, -20);
+  ctx.quadraticCurveTo(8, -14, 0, -12);
+  ctx.quadraticCurveTo(-8, -14, -10, -20);
+  ctx.fill();
+
+  // Label
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 9px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('VIEJITA', 0, 36);
+
+  ctx.restore();
+}
+
+function drawPenitente(x, y) {
+  // Person crawling on knees — obstacle is LOW (player must slide)
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(0, 16, 20, 6, 0, 0, Math.PI*2); ctx.fill();
+
+  // Body (horizontal, low to ground)
+  ctx.fillStyle = '#4a0000';
+  ctx.beginPath();
+  ctx.ellipse(-5, 5, 22, 10, -0.2, 0, Math.PI*2);
+  ctx.fill();
+
+  // Penitential robe
+  ctx.fillStyle = '#3d0000';
+  ctx.fillRect(-24, -2, 40, 14);
+
+  // Arms
+  ctx.strokeStyle = '#c4856a';
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-16, 4); ctx.lineTo(-26, 10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-16, 4); ctx.lineTo(-28, 12); ctx.stroke();
+
+  // Head (forward, looking down)
+  ctx.fillStyle = '#c4856a';
+  ctx.beginPath(); ctx.arc(-22, 2, 10, 0, Math.PI*2); ctx.fill();
+  // Blindfold/hood
+  ctx.fillStyle = '#3d0000';
+  ctx.beginPath(); ctx.arc(-22, 0, 10, Math.PI*0.8, Math.PI*1.8); ctx.fill();
+  ctx.fillRect(-32, -8, 10, 10);
+
+  // Knees on ground
+  ctx.fillStyle = '#5c3d1e';
+  ctx.beginPath(); ctx.ellipse(8, 13, 7, 5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-2, 14, 7, 5, 0, 0, Math.PI*2); ctx.fill();
+
+  // Rocks/pebbles for penance
+  ctx.fillStyle = '#888';
+  ctx.beginPath(); ctx.arc(18, 10, 3, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(22, 13, 2, 0, Math.PI*2); ctx.fill();
+
+  // Slide indicator arrow (down)
+  ctx.fillStyle = 'rgba(255,80,80,0.85)';
+  ctx.font = 'bold 11px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('⬇ SLIDE', 0, 32);
+
+  ctx.restore();
+}
+
+function drawAnda(x, y) {
+  // Religious procession float — tall platform, player must slide under
+  ctx.save();
+  ctx.translate(x, y);
+
+  const w = LANE_W * 0.85;
+  const platformH = 14;
+  const legH = 46; // tall enough to walk under
+  const saintH = 40;
+
+  // Carriers (people holding poles)
+  [-w/2+6, w/2-6].forEach(cx => {
+    // Carrier body
+    ctx.fillStyle = '#8b4513';
+    ctx.fillRect(cx - 6, legH - 12, 12, 20);
+    // Head
+    ctx.fillStyle = '#d4956a';
+    ctx.beginPath(); ctx.arc(cx, legH - 18, 8, 0, Math.PI*2); ctx.fill();
+    // Arms up
+    ctx.strokeStyle = '#d4956a';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx, legH - 8);
+    ctx.lineTo(cx, -platformH - 4);
+    ctx.stroke();
+  });
+
+  // Platform (wide, at top of legs)
+  ctx.fillStyle = '#8B4513';
+  roundRect(-w/2, -platformH, w, platformH, 4, '#8B4513');
+  // Platform gold trim
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-w/2, -platformH, w, platformH);
+  // Gold filigree
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 1;
+  for(let i=0; i<5; i++) {
+    ctx.beginPath();
+    ctx.arc(-w/2 + (i+0.5)*(w/5), -platformH/2, 4, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  // Saint statue on platform
+  // Robe
+  ctx.fillStyle = '#fff8e1';
+  ctx.beginPath();
+  ctx.moveTo(-10, -platformH);
+  ctx.lineTo(-14, -platformH - saintH + 10);
+  ctx.quadraticCurveTo(0, -platformH - saintH - 8, 14, -platformH - saintH + 10);
+  ctx.lineTo(10, -platformH);
+  ctx.closePath();
+  ctx.fill();
+  // Halo
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(0, -platformH - saintH + 2, 14, 0, Math.PI*2); ctx.stroke();
+  // Head
+  ctx.fillStyle = '#d4956a';
+  ctx.beginPath(); ctx.arc(0, -platformH - saintH + 2, 9, 0, Math.PI*2); ctx.fill();
+  // Crown/halo gold center
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.arc(0, -platformH - saintH + 2, 5, 0, Math.PI*2); ctx.fill();
+
+  // Candles on platform
+  [-w/2+10, w/2-10].forEach(cx => {
+    ctx.fillStyle = '#fffde7';
+    ctx.fillRect(cx - 3, -platformH - 16, 6, 16);
+    ctx.fillStyle = '#ff8f00';
+    ctx.beginPath(); ctx.arc(cx, -platformH - 18, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ffeb3b';
+    ctx.beginPath(); ctx.arc(cx, -platformH - 20, 2, 0, Math.PI*2); ctx.fill();
+  });
+
+  // Slide indicator
+  ctx.fillStyle = 'rgba(255,80,80,0.85)';
+  ctx.font = 'bold 11px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('⬇ SLIDE', 0, legH + 24);
+
+  ctx.restore();
+}
+
+function drawPilgrim(x, y) {
+  // Large group blocking lane — multiple figures
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Draw 3 pilgrims in a cluster
+  const positions = [[-12, 0], [0, -6], [12, 4]];
+  positions.forEach(([ox, oy], idx) => {
+    const bob = Math.sin(frameCount * 0.2 + idx * 1.2) * 2;
+
+    // Body robe
+    ctx.fillStyle = ['#795548','#6d4c41','#8d6e63'][idx];
+    ctx.beginPath();
+    ctx.moveTo(ox - 9, oy + 5);
+    ctx.lineTo(ox - 7, oy - 20);
+    ctx.lineTo(ox + 7, oy - 20);
+    ctx.lineTo(ox + 9, oy + 5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Head
+    ctx.fillStyle = '#d4956a';
+    ctx.beginPath(); ctx.arc(ox, oy - 24 + bob, 8, 0, Math.PI*2); ctx.fill();
+
+    // Hat
+    ctx.fillStyle = '#4e342e';
+    ctx.beginPath(); ctx.ellipse(ox, oy - 30 + bob, 10, 3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillRect(ox - 5, oy - 35 + bob, 10, 8);
+
+    // Candle / prayer book
+    if (idx === 1) {
+      ctx.fillStyle = '#fffde7';
+      ctx.fillRect(ox + 5, oy - 18, 5, 12);
+      ctx.fillStyle = '#ff8f00';
+      ctx.beginPath(); ctx.arc(ox + 7, oy - 20, 3, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle = '#1565c0';
+      ctx.fillRect(ox - 10, oy - 18, 8, 10);
+    }
+  });
+
+  // Label
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.font = 'bold 9px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('PILGRIMS', 0, 18);
+
+  ctx.restore();
+}
+
+// ─── MILAGRO ORB ─────────────────────────────────────────────────────────────
+function drawMilagro(x, y) {
+  const t = frameCount * 0.05;
+  const pulse = 1 + Math.sin(t * 2) * 0.12;
+  const r = 16 * pulse;
+
+  const glow = ctx.createRadialGradient(x, y, 2, x, y, r * 2);
+  glow.addColorStop(0, 'rgba(255,215,0,0.7)');
+  glow.addColorStop(0.5, 'rgba(255,165,0,0.3)');
+  glow.addColorStop(1, 'rgba(255,215,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(x, y, r * 2, 0, Math.PI*2); ctx.fill();
+
+  const grad = ctx.createRadialGradient(x - r*0.3, y - r*0.3, r*0.1, x, y, r);
+  grad.addColorStop(0, '#fff9c4');
+  grad.addColorStop(0.5, '#FFD700');
+  grad.addColorStop(1, '#F57F17');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+
+  // Star sparkle
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.font = `${12 * pulse}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('✦', x, y);
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = 'rgba(255,255,200,0.9)';
+  ctx.font = 'bold 8px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('MILAGRO', x, y + r + 10);
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  // Background bar
+  ctx.fillStyle = 'rgba(10,10,30,0.88)';
+  ctx.fillRect(0, 0, W, HUD_H);
+
+  // Score
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold 14px Georgia';
+  ctx.textAlign = 'left';
+  ctx.fillText('PUNTOS: ' + score, 14, 26);
+
+  // Altitude label
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 13px Georgia';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${Math.floor(altitude)}m / ${MAX_ALT}m`, W - 14, 26);
+
+  // Progress bar background
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  roundRect(14, 36, W - 28, 16, 8, 'rgba(255,255,255,0.15)');
+
+  // Progress bar fill
+  const prog = altitude / MAX_ALT;
+  const barW = (W - 28) * prog;
+  if (barW > 0) {
+    const barGrad = ctx.createLinearGradient(14, 0, 14 + barW, 0);
+    barGrad.addColorStop(0, '#1565c0');
+    barGrad.addColorStop(0.5, '#42a5f5');
+    barGrad.addColorStop(1, '#fff9c4');
+    ctx.fillStyle = barGrad;
+    // Clipped round rect for progress
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(14, 36, W - 28, 16, 8);
+    ctx.clip();
+    ctx.fillRect(14, 36, barW, 16);
+    ctx.restore();
+  }
+
+  // Basilica icon at end of bar
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('⛪', W - 14, 50);
+
+  // Altitude tick marks
+  for (let m = 100; m < MAX_ALT; m += 100) {
+    const tx = 14 + (W - 28) * (m / MAX_ALT);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillRect(tx - 1, 36, 2, 16);
+  }
+
+  // Invincible banner
+  if (invincible) {
+    ctx.fillStyle = 'rgba(255,215,0,0.9)';
+    ctx.font = 'bold 13px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('✦ MILAGRO ✦', W/2, 68);
+  }
+
+  // Lane indicators (subtle)
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 1;
+  [W*0.36, W*0.64].forEach(lx => {
+    ctx.beginPath(); ctx.moveTo(lx, HUD_H); ctx.lineTo(lx, H); ctx.stroke();
+  });
+}
+
+// ─── PARTICLES ───────────────────────────────────────────────────────────────
+function spawnParticles(x, y, color, count=8) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 / count) * i + Math.random() * 0.5;
+    const speed = 1.5 + Math.random() * 3;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      color,
+      r: 3 + Math.random() * 4,
+    });
+  }
+}
+
+function updateParticles() {
+  particles = particles.filter(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1;
+    p.life -= 0.03;
+    if (p.life <= 0) return false;
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+    return true;
+  });
+}
+
+// ─── OBSTACLE MANAGEMENT ─────────────────────────────────────────────────────
+const OBS_TYPES = ['viejita', 'penitente', 'anda', 'pilgrim'];
+
+function spawnObstacle() {
+  const type = OBS_TYPES[Math.floor(Math.random() * OBS_TYPES.length)];
+  const laneIdx = Math.floor(Math.random() * 3);
+
+  // Andas and pilgrims block wide — use full lane
+  let obsLane = laneIdx;
+
+  obstacles.push({
+    type,
+    lane: obsLane,
+    x: LANE_XS[obsLane],
+    y: HUD_H - 20,
+    hit: false,
+    dead: false,
+  });
+}
+
+function spawnMilagro() {
+  const laneIdx = Math.floor(Math.random() * 3);
+  milagros.push({
+    lane: laneIdx,
+    x: LANE_XS[laneIdx],
+    y: HUD_H - 20,
+  });
+}
+
+function getObstacleHeight(type) {
+  if (type === 'viejita')  return 58;
+  if (type === 'penitente') return 24; // low — slide under
+  if (type === 'anda')     return 110;  // tall — slide under the platform
+  if (type === 'pilgrim')  return 58;
+  return 58;
+}
+
+function requiresSlide(type) {
+  return type === 'penitente' || type === 'anda';
+}
+
+function checkCollision(obs) {
+  if (obs.hit || obs.dead) return false;
+
+  const px = getPlayerX();
+  const py = PLAYER_Y;
+  const ox = obs.x;
+  const oy = obs.y;
+  const oh = getObstacleHeight(obs.type);
+
+  // Lane match (within ~LANE_W/2)
+  if (Math.abs(px - ox) > LANE_W * 0.55) return false;
+
+  // Vertical overlap
+  const playerTop    = py - (sliding ? 12 : PLAYER_H/2);
+  const playerBottom = py + PLAYER_H/2;
+  const obsTop       = oy - oh/2;
+  const obsBottom    = oy + oh/2;
+
+  if (playerBottom < obsTop || playerTop > obsBottom) return false;
+
+  // If obstacle requires slide, only collide if NOT sliding
+  if (requiresSlide(obs.type)) {
+    if (sliding) return false; // successfully ducked
+    // Additional check: if standing, only collide with the obstacle body (not the top platform clearance)
+    if (obs.type === 'anda') {
+      // Platform at top — body is carriers below
+      const platformTop = oy - oh/2;
+      const platformBottom = oy - oh/2 + 16;
+      // If player's head is below platform bottom and body is in carrier zone
+      if (playerTop > platformBottom) return false; // player is under the platform gap
+    }
+    return true;
+  }
+
+  return true;
+}
+
+// ─── GAME STATE MANAGEMENT ────────────────────────────────────────────────────
+function resetGame() {
+  lane = 1;
+  altitude = 0;
+  score = 0;
+  speed = BASE_SPEED;
+  invincible = false;
+  invincibleTimer = 0;
+  sliding = false;
+  slideTimer = 0;
+  laneChanging = false;
+  laneChangeProgress = 0;
+  fromLane = 1;
+  toLane = 1;
+  stepOffset = 0;
+  obstacles = [];
+  particles = [];
+  milagros = [];
+  flashTimer = 0;
+  frameCount = 0;
+  spawnTimer = 0;
+  spawnInterval = 90;
+  state = 'playing';
+  startMusic();
+}
+
+function triggerDeath() {
+  if (invincible) return;
+  state = 'dead';
+  if (score > highScore) highScore = score;
+  sfxHit();
+  stopMusic();
+  spawnParticles(getPlayerX(), PLAYER_Y, '#ff4444', 16);
+}
+
+// ─── INPUT HANDLING ───────────────────────────────────────────────────────────
+function switchLane(dir) {
+  if (state !== 'playing') return;
+  const target = Math.max(0, Math.min(2, lane + dir));
+  if (target === lane) return;
+  sfxSwitch();
+  fromLane = laneChanging ? toLane : lane;
+  toLane = target;
+  lane = target;
+  laneChanging = true;
+  laneChangeProgress = 0;
+}
+
+function doSlide() {
+  if (state !== 'playing') return;
+  if (sliding) return;
+  sfxSlide();
+  sliding = true;
+  slideTimer = 50;
+}
+
+// Keyboard
+document.addEventListener('keydown', e => {
+  if (state === 'title') { resetGame(); return; }
+  if (state === 'dead' || state === 'win') {
+    if (e.key === 'Enter' || e.key === ' ') { resetGame(); return; }
+  }
+  if (e.key === 'ArrowLeft')  switchLane(-1);
+  if (e.key === 'ArrowRight') switchLane(1);
+  if (e.key === 'ArrowDown')  doSlide();
+  e.preventDefault();
+});
+
+// Touch
+canvas.addEventListener('touchstart', e => {
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  const absDx = Math.abs(dx), absDy = Math.abs(dy);
+
+  if (state === 'title') { resetGame(); return; }
+  if (state === 'dead' || state === 'win') { resetGame(); return; }
+
+  if (absDx < 15 && absDy < 15) return; // tap — ignore
+
+  if (absDy > absDx && dy > 30) {
+    doSlide();
+  } else if (absDx > absDy) {
+    if (dx < -20) switchLane(-1);
+    if (dx > 20)  switchLane(1);
+  }
+  e.preventDefault();
+}, { passive: false });
+
+// ─── SCREENS ─────────────────────────────────────────────────────────────────
+function drawTitleScreen() {
+  // Background sky
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+  skyGrad.addColorStop(0, '#1565c0');
+  skyGrad.addColorStop(0.6, '#42a5f5');
+  skyGrad.addColorStop(1, '#81d4fa');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  drawMountains(0.5);
+  drawBasilica(0.6);
+  drawHills(0.3);
+  drawSteps();
+
+  // Title overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  roundRect(20, 120, W - 40, 340, 16, 'rgba(0,0,0,0.55)');
+
+  // Title
+  strokeText('MONSERRATE', W/2, 200, 36, '#FFD700', '#000');
+  strokeText('RUNNER', W/2, 246, 44, '#fff', '#000');
+
+  // Subtitle
+  ctx.fillStyle = '#ffe082';
+  ctx.font = '14px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('Sube los escalones sagrados', W/2, 278);
+  ctx.fillText('hasta la Basílica', W/2, 298);
+
+  // Controls hint
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = '13px Georgia';
+  ctx.fillText('← → Cambiar carril', W/2, 336);
+  ctx.fillText('↓ Deslizarse', W/2, 356);
+  ctx.fillText('Toque pantalla para iniciar', W/2, 390);
+
+  // Obstacle hint
+  ctx.fillStyle = 'rgba(255,200,100,0.9)';
+  ctx.font = '12px Georgia';
+  ctx.fillText('¡Esquiva viejitas, penitentes,', W/2, 424);
+  ctx.fillText('andas y peregrinos!', W/2, 442);
+
+  // Start button
+  const pulse = 0.9 + Math.sin(frameCount * 0.08) * 0.1;
+  ctx.save();
+  ctx.translate(W/2, 530);
+  ctx.scale(pulse, pulse);
+  roundRect(-90, -25, 180, 50, 12, '#ce1126');
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-90, -25, 180, 50);
+  strokeText('¡JUGAR!', 0, 8, 22, '#fff', '#800000');
+  ctx.restore();
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = '13px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Récord: ${highScore} pts`, W/2, 600);
+  }
+
+  // Colombian flag stripe at bottom
+  fillRect(0, H - 30, W, 10, '#FFD700');
+  fillRect(0, H - 20, W, 10, '#003893');
+  fillRect(0, H - 10, W, 10, '#ce1126');
+
+  frameCount++;
+}
+
+function drawDeathScreen() {
+  // Dim background
+  drawBackground();
+  drawSteps();
+
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, H);
+
+  roundRect(20, 200, W - 40, 340, 16, 'rgba(80,0,0,0.9)');
+  ctx.strokeStyle = '#ce1126';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(20, 200, W - 40, 340);
+
+  strokeText('¡Ay no!', W/2, 270, 38, '#ff8a80', '#000');
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('Dios te bendiga', W/2, 310);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold 18px Georgia';
+  ctx.fillText(`Puntos: ${score}`, W/2, 356);
+  ctx.fillStyle = '#ffe082';
+  ctx.font = '15px Georgia';
+  ctx.fillText(`Altitud: ${Math.floor(altitude)}m`, W/2, 384);
+
+  if (score >= highScore && score > 0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 14px Georgia';
+    ctx.fillText('¡Nuevo récord!', W/2, 412);
+  } else if (highScore > 0) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '13px Georgia';
+    ctx.fillText(`Récord: ${highScore} pts`, W/2, 412);
+  }
+
+  // Restart button
+  const pulse = 0.95 + Math.sin(frameCount * 0.1) * 0.05;
+  ctx.save();
+  ctx.translate(W/2, 490);
+  ctx.scale(pulse, pulse);
+  roundRect(-100, -25, 200, 50, 12, '#1565c0');
+  strokeText('Intentar de nuevo', 0, 8, 18, '#fff', '#003');
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '12px Georgia';
+  ctx.fillText('Toca la pantalla o presiona Enter', W/2, 560);
+
+  frameCount++;
+}
+
+function drawWinScreen() {
+  // Triumphant golden background
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#0d47a1');
+  bgGrad.addColorStop(0.5, '#1976d2');
+  bgGrad.addColorStop(1, '#42a5f5');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Big basilica
+  drawBasilica(1.0);
+
+  // Golden rays
+  ctx.save();
+  ctx.translate(W/2, 120);
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2 + frameCount * 0.005;
+    ctx.fillStyle = `rgba(255,215,0,${0.05 + Math.sin(angle*3)*0.02})`;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(angle) * 200, Math.sin(angle) * 200);
+    ctx.lineTo(Math.cos(angle + 0.2) * 200, Math.sin(angle + 0.2) * 200);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // Win panel
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  roundRect(15, 380, W - 30, 360, 16, 'rgba(0,0,0,0.65)');
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(15, 380, W - 30, 360);
+
+  strokeText('¡Llegaste!', W/2, 440, 40, '#FFD700', '#000');
+  ctx.fillStyle = '#fff';
+  ctx.font = '15px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('¡Coronaste el Monserrate!', W/2, 476);
+  ctx.fillText('Que el Señor Caído te bendiga.', W/2, 500);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold 20px Georgia';
+  ctx.fillText(`Puntos: ${score}`, W/2, 546);
+  ctx.fillStyle = '#ffe082';
+  ctx.font = '15px Georgia';
+  ctx.fillText('Altitud: 900m ✓', W/2, 572);
+
+  if (score > highScore) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 15px Georgia';
+    ctx.fillText('¡Nuevo récord!', W/2, 598);
+    highScore = score;
+  }
+
+  // Play again
+  const pulse = 0.95 + Math.sin(frameCount * 0.1) * 0.05;
+  ctx.save();
+  ctx.translate(W/2, 660);
+  ctx.scale(pulse, pulse);
+  roundRect(-100, -25, 200, 50, 12, '#ce1126');
+  strokeText('Jugar de nuevo', 0, 8, 18, '#fff', '#800000');
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '12px Georgia';
+  ctx.fillText('Toca la pantalla o presiona Enter', W/2, 720);
+
+  // Flag
+  fillRect(0, H - 30, W, 10, '#FFD700');
+  fillRect(0, H - 20, W, 10, '#003893');
+  fillRect(0, H - 10, W, 10, '#ce1126');
+
+  frameCount++;
+}
+
+// ─── MAIN GAME LOOP ──────────────────────────────────────────────────────────
+function update() {
+  frameCount++;
+
+  // Difficulty scaling every 100m
+  speed = BASE_SPEED + Math.floor(altitude / 100) * 0.4;
+  spawnInterval = Math.max(35, 90 - Math.floor(altitude / 100) * 7);
+
+  // Scroll steps
+  stepOffset += speed;
+
+  // Altitude
+  altitude = Math.min(MAX_ALT, altitude + speed * 0.055);
+  score = Math.floor(altitude * 1.8 + frameCount * 0.05);
+
+  if (altitude >= MAX_ALT) {
+    state = 'win';
+    stopMusic();
+    return;
+  }
+
+  // Lane change animation
+  if (laneChanging) {
+    laneChangeProgress = Math.min(1, laneChangeProgress + 0.12);
+    if (laneChangeProgress >= 1) laneChanging = false;
+  }
+
+  // Slide timer
+  if (sliding) {
+    slideTimer--;
+    if (slideTimer <= 0) sliding = false;
+  }
+
+  // Invincible timer
+  if (invincible) {
+    invincibleTimer--;
+    if (invincibleTimer <= 0) invincible = false;
+  }
+
+  // Flash
+  if (flashTimer > 0) flashTimer--;
+
+  // Spawn obstacles
+  spawnTimer++;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnObstacle();
+
+    // Occasionally spawn milagro
+    if (Math.random() < 0.12) {
+      spawnMilagro();
+    }
+  }
+
+  // Move obstacles
+  obstacles.forEach(obs => {
+    obs.y += speed * 1.05;
+
+    // Collision check
+    if (!obs.hit && !invincible) {
+      if (checkCollision(obs)) {
+        obs.hit = true;
+        triggerDeath();
+      }
+    }
+
+    if (obs.y > H + 60) obs.dead = true;
+  });
+  obstacles = obstacles.filter(o => !o.dead);
+
+  // Move milagros
+  milagros.forEach(m => {
+    m.y += speed * 1.05;
+    const px = getPlayerX();
+    if (Math.abs(px - m.x) < 28 && Math.abs(PLAYER_Y - m.y) < 30) {
+      m.collected = true;
+      invincible = true;
+      invincibleTimer = 300;
+      flashTimer = 20;
+      flashColor = 'rgba(255,215,0,0.5)';
+      sfxMilagro();
+      spawnParticles(m.x, m.y, '#FFD700', 20);
+    }
+  });
+  milagros = milagros.filter(m => !m.collected && m.y < H + 50);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  drawBackground();
+  drawSteps();
+
+  // Obstacles behind player
+  obstacles.forEach(obs => {
+    if (obs.y < PLAYER_Y - 60) {
+      drawObstacle(obs);
+    }
+  });
+
+  // Milagros
+  milagros.forEach(m => drawMilagro(m.x, m.y));
+
+  // Player
+  drawPlayer();
+
+  // Obstacles in front of player
+  obstacles.forEach(obs => {
+    if (obs.y >= PLAYER_Y - 60) {
+      drawObstacle(obs);
+    }
+  });
+
+  // Particles
+  updateParticles();
+
+  // Flash overlay
+  if (flashTimer > 0) {
+    ctx.fillStyle = flashColor;
+    ctx.globalAlpha = flashTimer / 20;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  drawHUD();
+}
+
+function drawObstacle(obs) {
+  switch(obs.type) {
+    case 'viejita':  drawViejita(obs.x, obs.y);  break;
+    case 'penitente': drawPenitente(obs.x, obs.y); break;
+    case 'anda':     drawAnda(obs.x, obs.y);     break;
+    case 'pilgrim':  drawPilgrim(obs.x, obs.y);  break;
+  }
+}
+
+function gameLoop() {
+  switch (state) {
+    case 'title':
+      drawTitleScreen();
+      break;
+    case 'playing':
+      update();
+      draw();
+      break;
+    case 'dead':
+      drawDeathScreen();
+      break;
+    case 'win':
+      drawWinScreen();
+      break;
+  }
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── START ───────────────────────────────────────────────────────────────────
+gameLoop();
+</script>
+</body>
+</html>
