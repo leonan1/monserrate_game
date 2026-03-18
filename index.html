@@ -932,7 +932,13 @@ function drawHUD() {
     // Clipped round rect for progress
     ctx.save();
     ctx.beginPath();
-    ctx.roundRect(14, 36, W - 28, 16, 8);
+    const _rx=8,_x=14,_y=36,_w=W-28,_h=16;
+    ctx.moveTo(_x+_rx,_y);
+    ctx.lineTo(_x+_w-_rx,_y); ctx.quadraticCurveTo(_x+_w,_y,_x+_w,_y+_rx);
+    ctx.lineTo(_x+_w,_y+_h-_rx); ctx.quadraticCurveTo(_x+_w,_y+_h,_x+_w-_rx,_y+_h);
+    ctx.lineTo(_x+_rx,_y+_h); ctx.quadraticCurveTo(_x,_y+_h,_x,_y+_h-_rx);
+    ctx.lineTo(_x,_y+_rx); ctx.quadraticCurveTo(_x,_y,_x+_rx,_y);
+    ctx.closePath();
     ctx.clip();
     ctx.fillRect(14, 36, barW, 16);
     ctx.restore();
