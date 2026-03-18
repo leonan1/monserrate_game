@@ -1170,6 +1170,11 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
 });
 
+// Mouse click (desktop)
+canvas.addEventListener('click', () => {
+  if (state === 'title' || state === 'dead' || state === 'win') resetGame();
+});
+
 // Touch
 canvas.addEventListener('touchstart', e => {
   touchStartX = e.touches[0].clientX;
