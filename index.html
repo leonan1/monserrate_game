@@ -24,6 +24,7 @@
     display: flex;
     justify-content: center;
     align-items: center;
+    width: 100vw;
     height: 100vh;
     overflow: hidden;
     font-family: 'Georgia', serif;
@@ -31,14 +32,33 @@
   }
   #gameCanvas {
     display: block;
-    image-rendering: pixelated;
+  }
+  #errBox {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: #c00;
+    color: #fff;
+    font: bold 14px monospace;
+    padding: 12px;
+    z-index: 999;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 </style>
 </head>
 <body>
+<div id="errBox"></div>
 <canvas id="gameCanvas"></canvas>
 <script>
 'use strict';
+
+window.onerror = function(msg, src, line, col, err) {
+  var box = document.getElementById('errBox');
+  box.style.display = 'block';
+  box.textContent = 'ERROR linea ' + line + ': ' + msg + '\n' + (err ? err.stack : '');
+  return true;
+};
 
 // ─── CANVAS SETUP ──────────────────────────────────────────────────────────
 const canvas = document.getElementById('gameCanvas');
@@ -1512,26 +1532,28 @@ function drawObstacle(obs) {
 }
 
 function gameLoop() {
-  switch (state) {
-    case 'title':
-      drawTitleScreen();
-      break;
-    case 'playing':
-      update();
-      draw();
-      break;
-    case 'dead':
-      drawDeathScreen();
-      break;
-    case 'win':
-      drawWinScreen();
-      break;
+  try {
+    switch (state) {
+      case 'title':   drawTitleScreen();  break;
+      case 'playing': update(); draw();   break;
+      case 'dead':    drawDeathScreen();  break;
+      case 'win':     drawWinScreen();    break;
+    }
+  } catch(e) {
+    var box = document.getElementById('errBox');
+    box.style.display = 'block';
+    box.textContent = 'ERROR en gameLoop [' + state + ']:\n' + e.message + '\n' + e.stack;
+    return; // stop loop on error
   }
   requestAnimationFrame(gameLoop);
 }
 
 // ─── START ───────────────────────────────────────────────────────────────────
-gameLoop();
+// Quick canvas test — fills a green rect; if you don't see green, canvas is broken
+ctx.fillStyle = '#00c853';
+ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+setTimeout(function() { gameLoop(); }, 100);
 </script>
 </body>
 </html>
